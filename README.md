@@ -17,10 +17,10 @@ A syndication feed bot for [Revolt](https://revolt.chat) that supports RSS, Atom
 
 ## Features
 
-[X] Support for RSS, Atom, and JSON feeds
-[X] Automatic feed checking
-[X] Manual forced feed checking
-[X] Duplicate detection to prevent spam
+- [X] Support for RSS, Atom, and JSON feeds
+- [X] Automatic feed checking
+- [X] Manual forced feed checking
+- [X] Duplicate detection to prevent spam
 
 ## Documentation and Support
 
