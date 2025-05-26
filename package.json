@@ -1,0 +1,25 @@
+{
+	"name": "autofeeds",
+	"version": "1.0.0",
+	"description": "A feed bot for Revolt that supports RSS, Atom, and JSON feeds.",
+	"main": "bot.js",
+	"scripts": {
+		"start": "bun bot.js",
+		"dev": "bun bot.js"
+	},
+	"dependencies": {
+		"revolt.js": "^7.2.0",
+		"mysql2": "^3.14.1",
+		"rss-parser": "^3.13.0",
+		"node-fetch": "^3.3.2",
+		"node-cron": "^4.0.7"
+	},
+	"keywords": [
+		"revolt",
+		"rss",
+		"atom",
+		"json-feed",
+		"bot",
+		"feeds"
+	]
+}

@@ -1,0 +1,51 @@
+services:
+  mariadb:
+    image: mariadb:11.4.7
+    container_name: autofeeds-db
+    restart: unless-stopped
+    environment:
+      - MYSQL_DATABASE=${DB_NAME}
+      - MYSQL_USER=${DB_USER}
+      - MYSQL_PASSWORD=${DB_PASS}
+      - MYSQL_ROOT_PASSWORD=${DB_ROOT_PASS}
+    volumes:
+      - ./db:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - bot-network
+    ports:
+      - "3306:3306"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      start_period: 10s
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  autofeeds-bot:
+    build: .
+    container_name: autofeeds-bot
+    restart: unless-stopped
+    environment:
+      - BOT_TOKEN
+      - DB_HOST=mariadb
+      - DB_PORT=3306
+      - DB_NAME
+      - DB_USER
+      - DB_PASS
+      - NODE_ENV=production
+    networks:
+      - bot-network
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "bun", "-e", "process.exit(0)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  bot-network:
+    driver: bridge
