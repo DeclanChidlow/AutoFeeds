@@ -15,13 +15,37 @@ class AutoFeeds {
 		});
 		this.db = null;
 		this.feeds = new Map();
+		this.setupErrorHandlers();
+	}
+
+	setupErrorHandlers() {
+		this.client.on("error", (error) => {
+			console.error("Revolt client error:", error);
+		});
+
+		this.client.on("disconnect", () => {
+			console.log("Bot disconnected from Revolt");
+		});
+
+		this.client.on("connect", () => {
+			console.log("Bot connected to Revolt");
+		});
+
+		process.on("uncaughtException", (error) => {
+			console.error("Uncaught Exception:", error);
+		});
+
+		process.on("unhandledRejection", (reason, promise) => {
+			console.error("Unhandled Rejection at:", promise, "reason:", reason);
+		});
 	}
 
 	async init() {
 		try {
 			await this.initDatabase();
 			await this.loadFeeds();
-			await this.client.loginBot(process.env["BOT_TOKEN"]);
+			await this.connectBot();
+
 			console.log("Bot connected to Revolt!");
 
 			cron.schedule("*/15 * * * *", () => {
@@ -32,6 +56,28 @@ class AutoFeeds {
 		} catch (error) {
 			console.error("Failed to initialise bot:", error);
 			process.exit(1);
+		}
+	}
+
+	async connectBot() {
+		const maxRetries = 5;
+		let retries = 0;
+
+		while (retries < maxRetries) {
+			try {
+				await this.client.loginBot(process.env["BOT_TOKEN"]);
+				return;
+			} catch (error) {
+				retries++;
+				console.error(`Bot connection attempt ${retries}/${maxRetries} failed:`, error);
+
+				if (retries === maxRetries) {
+					throw error;
+				}
+
+				console.log("Retrying bot connection in 5 seconds...");
+				await new Promise((resolve) => setTimeout(resolve, 5000));
+			}
 		}
 	}
 
@@ -48,14 +94,28 @@ class AutoFeeds {
 					password: process.env["DB_PASS"] || "",
 					database: process.env["DB_NAME"] || "autofeeds",
 					charset: "utf8mb4",
+					connectTimeout: 10000,
+					acquireTimeout: 10000,
+					timeout: 10000,
 				});
 
 				// Test the connection
 				await this.db.execute("SELECT 1");
+				console.log("Database connection established successfully");
 				break;
 			} catch (error) {
 				retries++;
-				console.log(`Database connection attempt ${retries}/${maxRetries} failed, retrying in 2 seconds...`);
+				console.log(`Database connection attempt ${retries}/${maxRetries} failed:`, error.message);
+
+				if (this.db) {
+					try {
+						await this.db.end();
+					} catch (e) {
+						// Ignore cleanup errors
+					}
+					this.db = null;
+				}
+
 				await new Promise((resolve) => setTimeout(resolve, 2000));
 
 				if (retries === maxRetries) {
@@ -63,6 +123,14 @@ class AutoFeeds {
 				}
 			}
 		}
+
+		this.db.on("error", (error) => {
+			console.error("Database connection error:", error);
+			if (error.code === "PROTOCOL_CONNECTION_LOST") {
+				console.log("Attempting to reconnect to database...");
+				this.initDatabase();
+			}
+		});
 
 		await this.db.execute(`
             CREATE TABLE IF NOT EXISTS feeds (
@@ -73,8 +141,11 @@ class AutoFeeds {
                 feed_type ENUM('rss', 'atom', 'json') NOT NULL,
                 last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE KEY unique_feed_channel (url, channel_id)
-            )
+                UNIQUE KEY unique_feed_channel (url, channel_id),
+                INDEX idx_channel_id (channel_id),
+                INDEX idx_server_id (server_id),
+                INDEX idx_last_updated (last_updated)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         `);
 
 		await this.db.execute(`
@@ -87,23 +158,34 @@ class AutoFeeds {
                 published_at TIMESTAMP,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (feed_id) REFERENCES feeds(id) ON DELETE CASCADE,
-                UNIQUE KEY unique_item (feed_id, item_id)
-            )
+                UNIQUE KEY unique_item (feed_id, item_id),
+                INDEX idx_feed_id (feed_id),
+                INDEX idx_published_at (published_at),
+                INDEX idx_created_at (created_at)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         `);
 
 		console.log("Database initialised successfully");
 	}
 
 	async loadFeeds() {
-		const [rows] = await this.db.execute("SELECT * FROM feeds");
-		for (const feed of rows) {
-			this.feeds.set(`${feed.url}-${feed.channel_id}`, feed);
+		try {
+			const [rows] = await this.db.execute("SELECT * FROM feeds");
+			for (const feed of rows) {
+				this.feeds.set(`${feed.url}-${feed.channel_id}`, feed);
+			}
+			console.log(`Loaded ${rows.length} feeds from database`);
+		} catch (error) {
+			console.error("Error loading feeds:", error);
 		}
-		console.log(`Loaded ${rows.length} feeds from database`);
 	}
 
 	async isUserModerator(message) {
 		try {
+			if (!message.server) {
+				return false;
+			}
+
 			if (message.server.ownerId === message.authorId) {
 				return true;
 			}
@@ -117,22 +199,24 @@ class AutoFeeds {
 
 	setupCommands() {
 		this.client.on("messageCreate", async (message) => {
-			if (message.author?.bot || !message.content) return;
-
-			const botId = this.client.user.id;
-			const mention = `<@${botId}>`;
-
-			if (!message.content.startsWith(mention)) return;
-
-			const args = message.content.slice(mention.length).trim().split(" ");
-			const command = args[0]?.toLowerCase();
-
-			if (!command) {
-				await this.handleHelp(message);
-				return;
-			}
-
 			try {
+				if (message.author?.bot || !message.content) return;
+
+				const botId = this.client.user?.id;
+				if (!botId) return;
+
+				const mention = `<@${botId}>`;
+
+				if (!message.content.startsWith(mention)) return;
+
+				const args = message.content.slice(mention.length).trim().split(" ");
+				const command = args[0]?.toLowerCase();
+
+				if (!command) {
+					await this.handleHelp(message);
+					return;
+				}
+
 				switch (command) {
 					case "add":
 						await this.handleAddFeed(message, args);
@@ -150,12 +234,16 @@ class AutoFeeds {
 						await this.handleHelp(message);
 						break;
 					default:
-						await message.reply(`That isn't a command. You can see the doumentation with \`@${this.client.user?.username} help\`.`);
+						await message.reply(`That isn't a command. You can see the documentation with \`@${this.client.user?.username} help\`.`);
 						break;
 				}
 			} catch (error) {
 				console.error("Command error:", error);
-				await message.reply("An error occurred while processing your command.");
+				try {
+					await message.reply("An error occurred while processing your command.");
+				} catch (replyError) {
+					console.error("Failed to send error reply:", replyError);
+				}
 			}
 		});
 	}
@@ -173,7 +261,7 @@ class AutoFeeds {
 
 		const url = args[1];
 		const channelId = message.channelId;
-		const serverId = message.channel?.server.id;
+		const serverId = message.channel?.server?.id;
 
 		if (!serverId) {
 			await message.reply("This command can only be used in server channels.");
@@ -379,7 +467,7 @@ class AutoFeeds {
 						item.published,
 					]);
 
-					// Only post if this is a new item (removed the isManual condition)
+					// Only post if this is a new item
 					if (insertResult.affectedRows > 0) {
 						await this.postFeedItem(feed, item);
 						newItemsCount++;
@@ -464,7 +552,10 @@ class AutoFeeds {
 	async postFeedItem(feed, item) {
 		try {
 			const channel = this.client.channels.get(feed.channel_id);
-			if (!channel) return;
+			if (!channel) {
+				console.error(`Channel ${feed.channel_id} not found`);
+				return;
+			}
 
 			const message = this.formatFeedMessage(item);
 			await channel.sendMessage(message);
@@ -499,10 +590,32 @@ if (missingEnvVars.length > 0) {
 }
 
 const bot = new AutoFeeds();
-bot.init().catch(console.error);
+bot.init().catch((error) => {
+	console.error("Failed to start bot:", error);
+	process.exit(1);
+});
 
 process.on("SIGINT", async () => {
 	console.log("Shutting down bot...");
-	if (bot.db) await bot.db.end();
+	if (bot.db) {
+		try {
+			await bot.db.end();
+		} catch (error) {
+			console.error("Error closing database connection:", error);
+		}
+	}
 	process.exit(0);
 });
+
+process.on("SIGTERM", async () => {
+	console.log("Received SIGTERM, shutting down gracefully...");
+	if (bot.db) {
+		try {
+			await bot.db.end();
+		} catch (error) {
+			console.error("Error closing database connection:", error);
+		}
+	}
+	process.exit(0);
+});
+
