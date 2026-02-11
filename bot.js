@@ -1,7 +1,6 @@
 const { Client } = require("stoat.js");
 const mysql = require("mysql2/promise");
 const Parser = require("rss-parser");
-const fetch = require("node-fetch");
 const cron = require("node-cron");
 
 class AutoFeeds {
@@ -95,8 +94,6 @@ class AutoFeeds {
 					database: process.env["DB_NAME"] || "autofeeds",
 					charset: "utf8mb4",
 					connectTimeout: 10000,
-					acquireTimeout: 10000,
-					timeout: 10000,
 				});
 
 				// Test the connection
@@ -365,7 +362,7 @@ class AutoFeeds {
 		}
 
 		await message.reply("Checking feed...");
-		await this.checkFeed(feed, false);
+		await this.checkFeed(feed, true);
 	}
 
 	async handleHelp(message) {
@@ -390,10 +387,14 @@ class AutoFeeds {
 
 	async detectFeedType(url) {
 		try {
+			const controller = new AbortController();
+			const timeout = setTimeout(() => controller.abort(), 10000);
+
 			const response = await fetch(url, {
 				headers: { "User-Agent": "AutoFeeds/1.0" },
-				timeout: 10000,
+				signal: controller.signal,
 			});
+			clearTimeout(timeout);
 
 			if (!response.ok) return null;
 
@@ -445,7 +446,10 @@ class AutoFeeds {
 				items = await this.parseXmlFeed(feed.url);
 			}
 
-			if (items.length === 0) return;
+			if (items.length === 0) {
+				if (isManual) console.log(`No items found for ${feed.url}`);
+				return;
+			}
 
 			const [feedRows] = await this.db.execute("SELECT id FROM feeds WHERE url = ? AND channel_id = ?", [feed.url, feed.channel_id]);
 
@@ -480,7 +484,7 @@ class AutoFeeds {
 			// Update last_updated timestamp
 			await this.db.execute("UPDATE feeds SET last_updated = CURRENT_TIMESTAMP WHERE id = ?", [feedId]);
 
-			if (newItemsCount > 0) {
+			if (newItemsCount > 0 || isManual) {
 				console.log(`Posted ${newItemsCount} new items from ${feed.url}`);
 			}
 		} catch (error) {
@@ -522,31 +526,69 @@ class AutoFeeds {
 	}
 
 	async parseXmlFeed(url) {
-		const feed = await this.parser.parseURL(url);
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 10000);
 
-		return feed.items.map((item) => ({
-			id: item.guid || item.link || item.title,
-			title: item.title,
-			link: item.link,
-			description: item.contentSnippet || item.content,
-			published: new Date(item.pubDate || item.isoDate || Date.now()),
-		}));
+		try {
+			const response = await fetch(url, {
+				headers: {
+					"User-Agent": "AutoFeeds/1.0",
+					"Accept": "application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8",
+				},
+				signal: controller.signal,
+			});
+
+			if (!response.ok) {
+				throw new Error(`HTTP Error ${response.status}: ${response.statusText}`);
+			}
+
+			const text = await response.text();
+			const feed = await this.parser.parseString(text);
+
+			return feed.items.map((item) => ({
+				id: item.guid || item.link || item.title,
+				title: item.title,
+				link: item.link,
+				description: item.contentSnippet || item.content,
+				published: new Date(item.pubDate || item.isoDate || Date.now()),
+			}));
+		} catch (error) {
+			console.error(`Error parsing XML feed ${url}:`, error.message);
+			return [];
+		} finally {
+			clearTimeout(timeout);
+		}
 	}
 
 	async parseJsonFeed(url) {
-		const response = await fetch(url, {
-			headers: { "User-Agent": "AutoFeeds/1.0" },
-		});
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 10000);
 
-		const feed = await response.json();
+		try {
+			const response = await fetch(url, {
+				headers: { "User-Agent": "AutoFeeds/1.0" },
+				signal: controller.signal,
+			});
 
-		return (feed.items || []).map((item) => ({
-			id: item.id || item.url || item.title,
-			title: item.title,
-			link: item.url || item.external_url,
-			description: item.summary || item.content_text,
-			published: new Date(item.date_published || item.date_modified || Date.now()),
-		}));
+			if (!response.ok) {
+				throw new Error(`HTTP Error ${response.status}`);
+			}
+
+			const feed = await response.json();
+
+			return (feed.items || []).map((item) => ({
+				id: item.id || item.url || item.title,
+				title: item.title,
+				link: item.url || item.external_url,
+				description: item.summary || item.content_text,
+				published: new Date(item.date_published || item.date_modified || Date.now()),
+			}));
+		} catch (error) {
+			console.error(`Error parsing JSON feed ${url}:`, error.message);
+			return [];
+		} finally {
+			clearTimeout(timeout);
+		}
 	}
 
 	async postFeedItem(feed, item) {
@@ -618,4 +660,3 @@ process.on("SIGTERM", async () => {
 	}
 	process.exit(0);
 });
-
