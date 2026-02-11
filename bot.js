@@ -1,4 +1,4 @@
-const { Client } = require("revolt.js");
+const { Client } = require("stoat.js");
 const mysql = require("mysql2/promise");
 const Parser = require("rss-parser");
 const fetch = require("node-fetch");
@@ -20,15 +20,15 @@ class AutoFeeds {
 
 	setupErrorHandlers() {
 		this.client.on("error", (error) => {
-			console.error("Revolt client error:", error);
+			console.error("Stoat client error:", error);
 		});
 
 		this.client.on("disconnect", () => {
-			console.log("Bot disconnected from Revolt");
+			console.log("Bot disconnected from Stoat");
 		});
 
 		this.client.on("connect", () => {
-			console.log("Bot connected to Revolt");
+			console.log("Bot connected to Stoat");
 		});
 
 		process.on("uncaughtException", (error) => {
@@ -46,7 +46,7 @@ class AutoFeeds {
 			await this.loadFeeds();
 			await this.connectBot();
 
-			console.log("Bot connected to Revolt!");
+			console.log("Bot connected to Stoat!");
 
 			cron.schedule("*/15 * * * *", () => {
 				this.checkAllFeeds();

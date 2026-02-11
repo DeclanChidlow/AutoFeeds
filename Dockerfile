@@ -7,8 +7,8 @@ COPY bun.lock ./
 RUN bun install --frozen-lockfile --production
 COPY . .
 
-RUN addgroup --gid 1001 nodejs && \
-    adduser --uid 1001 --ingroup nodejs --system botuser
+RUN groupadd -g 1001 nodejs && \
+    useradd -u 1001 -g nodejs -s /bin/sh -m botuser
 RUN chown -R botuser:nodejs /app
 USER botuser
 

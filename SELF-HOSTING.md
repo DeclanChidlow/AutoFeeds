@@ -6,8 +6,8 @@ If you are hosting your own instance, or wish to run a modified version of the b
 > Due to limited time and resources, I can _not_ offer free self-hosting support. If you’d like paid assistance, or to have AutoFeeds hosted on your behalf in a paid capacity, please [contact Vale](https://vale.rocks/contact).
 
 > [!IMPORTANT]
-> This is a technical guide intended for people who wish to setup their own Revolt instance.
-> It is _not_ for the average end user. If you wish to add AutoFeeds to your server, you can [invite it]().
+> This is a technical guide intended for people who wish to setup their own Stoat instance of AutoFeeds.
+> It is _not_ for the average end user. If you wish to add AutoFeeds to your server, you can [invite it](https://stoat.chat/bot/01HZNFJK4C23AJE95JWY0JXB18).
 
 ## Prerequisites
 
