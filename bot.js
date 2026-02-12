@@ -179,7 +179,7 @@ class AutoFeeds {
 
 	async isUserModerator(message) {
 		try {
-			if (!message.server) {
+			if (!message.server || !message.authorId) {
 				return false;
 			}
 
@@ -187,7 +187,9 @@ class AutoFeeds {
 				return true;
 			}
 
-			return false;
+			const member = await message.server.fetchMember(message.authorId);
+
+			return member.permissions.has("ManageChannel") || member.permissions.has("ManageServer") || member.permissions.has("ManagePermissions");
 		} catch (error) {
 			console.error("Error checking moderator status:", error);
 			return false;
@@ -206,7 +208,7 @@ class AutoFeeds {
 
 				if (!message.content.startsWith(mention)) return;
 
-				const args = message.content.slice(mention.length).trim().split(" ");
+				const args = message.content.slice(mention.length).trim().split(/\s+/);
 				const command = args[0]?.toLowerCase();
 
 				if (!command) {
@@ -386,6 +388,11 @@ class AutoFeeds {
 	}
 
 	async detectFeedType(url) {
+		if (!url || typeof url !== "string" || url.trim() === "") {
+			console.error("detectFeedType called with invalid URL:", url);
+			return null;
+		}
+
 		try {
 			const controller = new AbortController();
 			const timeout = setTimeout(() => controller.abort(), 10000);
@@ -465,10 +472,10 @@ class AutoFeeds {
 					// Try to insert the item. This will fail silently if it already exists
 					const [insertResult] = await this.db.execute("INSERT IGNORE INTO feed_items (feed_id, item_id, title, link, published_at) VALUES (?, ?, ?, ?, ?)", [
 						feedId,
-						item.id,
-						item.title,
-						item.link,
-						item.published,
+						item.id ?? null,
+						item.title ?? null,
+						item.link ?? null,
+						item.published ?? null,
 					]);
 
 					// Only post if this is a new item
