@@ -47,7 +47,7 @@ class AutoFeeds {
 
 			console.log("Bot connected to Stoat!");
 
-			cron.schedule("*/15 * * * *", () => {
+			cron.schedule("*/20 * * * *", () => {
 				this.checkAllFeeds();
 			});
 
@@ -371,18 +371,20 @@ class AutoFeeds {
 		const botName = this.client.user?.username;
 		const help = `## AutoFeeds Help
 
-		\`@${botName} add <url>\` - Add an RSS/Atom/JSON feed to this channel
-		\`@${botName} remove <url>\` - Remove a feed from this channel
-		\`@${botName} list\` - List all feeds in this channel
-		\`@${botName} check <url>\` - Manually check a specific feed for new items
-		\`@${botName} help\` - Show this help message
+Visit [the documentation](<https://automod.vale.rocks/docs/autofeeds>) for usage information and [the AutoMod server](https://stt.gg/automod) for help.
 
-		**Supported Feed Types:**
-		- RSS 2.0
-		- Atom 1.0
-		- JSON Feed 1.0/1.1
+\`@${botName} add <url>\` - Add an RSS/Atom/JSON feed to this channel
+\`@${botName} remove <url>\` - Remove a feed from this channel
+\`@${botName} list\` - List all feeds in this channel
+\`@${botName} check <url>\` - Manually check a specific feed for new items
+\`@${botName} help\` - Show this help message
 
-		Feeds are automatically checked every 15 minutes.`;
+**Supported Feed Types:**
+- RSS 2.0
+- Atom 1.0
+- JSON Feed 1.0/1.1
+
+Feeds are automatically checked every 20 minutes.`;
 
 		await message.reply(help);
 	}
