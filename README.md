@@ -24,7 +24,7 @@ A syndication feed bot for [Stoat](https://stoat.chat) that supports RSS, Atom, 
 
 ## Documentation and Support
 
-All of AutoFeed's commands and features are documented in the help command, triggered by `@AutoFeeds help`, and on [the AutoMod website](https://automod.vale.rocks/docs/autofeeds). If you still have questions or need help, you can join the [support server on Stoat](https://stt.gg/automod). The Stoat server is also a good way to stay in the loop on updates, changes, and development.
+All of AutoFeeds' commands and features are documented in the help command, triggered by `@AutoFeeds help`, and on [the AutoMod website](https://automod.vale.rocks/docs/autofeeds). If you still have questions or need help, you can join the [support server on Stoat](https://stt.gg/automod). The Stoat server is also a good way to stay in the loop on updates, changes, and development.
 
 ## Invite to Your Server
 
