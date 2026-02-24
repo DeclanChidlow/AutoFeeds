@@ -8,7 +8,7 @@ class AutoFeeds {
 		this.client = new Client();
 		this.parser = new Parser({
 			customFields: {
-				feed: ["language", "ttl"],
+				feed: ["language", "ttl", "skipHours", "skipDays"],
 				item: ["guid", "pubDate", "published", "updated"],
 			},
 		});
@@ -26,8 +26,8 @@ class AutoFeeds {
 			console.log("Bot disconnected from Stoat");
 		});
 
-		this.client.on("connect", () => {
-			console.log("Bot connected to Stoat");
+		this.client.on("ready", () => {
+			console.log(`Bot connected to Stoat as ${this.client.user?.username || "AutoFeeds"}!`);
 		});
 
 		process.on("uncaughtException", (error) => {
@@ -44,8 +44,7 @@ class AutoFeeds {
 			await this.initDatabase();
 			await this.loadFeeds();
 			await this.connectBot();
-
-			console.log("Bot connected to Stoat!");
+			await this.setBotStatus();
 
 			cron.schedule("*/20 * * * *", () => {
 				this.checkAllFeeds();
@@ -86,20 +85,21 @@ class AutoFeeds {
 
 		while (retries < maxRetries) {
 			try {
-				this.db = await mysql.createConnection({
+				this.db = mysql.createPool({
 					host: process.env["DB_HOST"] || "localhost",
 					port: process.env["DB_PORT"] || 3306,
 					user: process.env["DB_USER"] || "feeduser",
 					password: process.env["DB_PASS"] || "",
 					database: process.env["DB_NAME"] || "autofeeds",
 					charset: "utf8mb4",
-					connectTimeout: 10000,
+					waitForConnections: true,
+					connectionLimit: 10,
+					queueLimit: 0,
 				});
 
-				// Test the connection
 				await this.db.execute("SELECT 1");
-				console.log("Database connection established successfully");
-				break;
+				console.log("Database pool established successfully");
+				return;
 			} catch (error) {
 				retries++;
 				console.log(`Database connection attempt ${retries}/${maxRetries} failed:`, error.message);
@@ -108,7 +108,7 @@ class AutoFeeds {
 					try {
 						await this.db.end();
 					} catch (e) {
-						// Ignore cleanup errors
+						/* Ignore */
 					}
 					this.db = null;
 				}
@@ -120,49 +120,6 @@ class AutoFeeds {
 				}
 			}
 		}
-
-		this.db.on("error", (error) => {
-			console.error("Database connection error:", error);
-			if (error.code === "PROTOCOL_CONNECTION_LOST") {
-				console.log("Attempting to reconnect to database...");
-				this.initDatabase();
-			}
-		});
-
-		await this.db.execute(`
-            CREATE TABLE IF NOT EXISTS feeds (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                url VARCHAR(512) NOT NULL,
-                channel_id VARCHAR(26) NOT NULL,
-                server_id VARCHAR(26) NOT NULL,
-                feed_type ENUM('rss', 'atom', 'json') NOT NULL,
-                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE KEY unique_feed_channel (url, channel_id),
-                INDEX idx_channel_id (channel_id),
-                INDEX idx_server_id (server_id),
-                INDEX idx_last_updated (last_updated)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-        `);
-
-		await this.db.execute(`
-            CREATE TABLE IF NOT EXISTS feed_items (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                feed_id INT NOT NULL,
-                item_id VARCHAR(512) NOT NULL,
-                title VARCHAR(512),
-                link VARCHAR(512),
-                published_at TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (feed_id) REFERENCES feeds(id) ON DELETE CASCADE,
-                UNIQUE KEY unique_item (feed_id, item_id),
-                INDEX idx_feed_id (feed_id),
-                INDEX idx_published_at (published_at),
-                INDEX idx_created_at (created_at)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
-        `);
-
-		console.log("Database initialised successfully");
 	}
 
 	async loadFeeds() {
@@ -177,6 +134,40 @@ class AutoFeeds {
 		}
 	}
 
+	async setBotStatus() {
+		const botName = this.client.user?.username || "AutoFeeds";
+		const statusText = `@${botName} help | Handling ${this.feeds.size} feeds`;
+
+		try {
+			// Ensure user object exists before sending PATCH
+			if (!this.client.user) {
+				await new Promise((resolve) => setTimeout(resolve, 1000));
+			}
+
+			const response = await fetch(`${this.client.options.baseURL || "https://api.stoat.chat"}/users/@me`, {
+				method: "PATCH",
+				headers: {
+					"Content-Type": "application/json",
+					"x-bot-token": process.env["BOT_TOKEN"],
+				},
+				body: JSON.stringify({
+					status: {
+						text: statusText,
+						presence: "Online",
+					},
+				}),
+			});
+
+			if (!response.ok) {
+				throw new Error(`HTTP Error ${response.status}`);
+			}
+
+			console.log(`Bot status updated: ${statusText}`);
+		} catch (error) {
+			console.error("Failed to update bot status:", error.message);
+		}
+	}
+
 	async isUserModerator(message) {
 		try {
 			if (!message.server || !message.authorId) {
@@ -188,7 +179,6 @@ class AutoFeeds {
 			}
 
 			const member = await message.server.fetchMember(message.authorId);
-
 			return member.permissions.has("ManageChannel") || member.permissions.has("ManageServer") || member.permissions.has("ManagePermissions");
 		} catch (error) {
 			console.error("Error checking moderator status:", error);
@@ -233,7 +223,7 @@ class AutoFeeds {
 						await this.handleHelp(message);
 						break;
 					default:
-						await message.reply(`That isn't a command. You can see the documentation with \`@${this.client.user?.username} help\`.`);
+						await message.reply(`That isn't a command. You can see the documentation with \`@${this.client.user?.username || "AutoFeeds"} help\`.`);
 						break;
 				}
 			} catch (error) {
@@ -254,7 +244,7 @@ class AutoFeeds {
 		}
 
 		if (args.length < 2) {
-			await message.reply(`Usage: \`@${this.client.user?.username} add <url>\``);
+			await message.reply(`Usage: \`@${this.client.user?.username || "AutoFeeds"} add <url>\``);
 			return;
 		}
 
@@ -267,8 +257,19 @@ class AutoFeeds {
 			return;
 		}
 
+		if (this.feeds.has(`${url}-${channelId}`)) {
+			await message.reply("⚠️ This feed is already configured for this channel.");
+			return;
+		}
+
 		try {
 			const feedType = await this.detectFeedType(url);
+
+			if (feedType === "expired_json") {
+				await message.reply("Cannot add feed: This JSON feed has been marked as 'expired' by its publisher, meaning it will no longer be updated.");
+				return;
+			}
+
 			if (!feedType) {
 				await message.reply("Invalid feed URL or unsupported feed format.");
 				return;
@@ -276,20 +277,19 @@ class AutoFeeds {
 
 			await this.db.execute("INSERT IGNORE INTO feeds (url, channel_id, server_id, feed_type) VALUES (?, ?, ?, ?)", [url, channelId, serverId, feedType]);
 
-			// Add to memory
 			const feed = { url, channel_id: channelId, server_id: serverId, feed_type: feedType };
 			this.feeds.set(`${url}-${channelId}`, feed);
 
 			await message.reply(`✅ Added ${feedType.toUpperCase()} feed: ${url}`);
+			this.setBotStatus();
 
-			// Initialise feed without posting items
 			await this.initialiseFeed(feed);
 		} catch (error) {
 			console.error("Error adding feed:", error);
 			if (error.code === "ER_DUP_ENTRY") {
-				await message.reply("This feed is already added to this channel.");
+				await message.reply("⚠️ This feed is already added to this channel.");
 			} else {
-				await message.reply("Failed to add feed. Please check the URL and try again.");
+				await message.reply("❌ Failed to add feed. Please check the URL and try again.");
 			}
 		}
 	}
@@ -301,7 +301,7 @@ class AutoFeeds {
 		}
 
 		if (args.length < 2) {
-			await message.reply(`Usage: \`@${this.client.user?.username} remove <url>\``);
+			await message.reply(`Usage: \`@${this.client.user?.username || "AutoFeeds"} remove <url>\``);
 			return;
 		}
 
@@ -314,6 +314,7 @@ class AutoFeeds {
 			if (result.affectedRows > 0) {
 				this.feeds.delete(`${url}-${channelId}`);
 				await message.reply("✅ Feed removed successfully.");
+				this.setBotStatus();
 			} else {
 				await message.reply("Feed not found in this channel.");
 			}
@@ -349,7 +350,7 @@ class AutoFeeds {
 
 	async handleCheckFeed(message, args) {
 		if (args.length < 2) {
-			await message.reply(`Usage: \`@${this.client.user?.username} check <url>\``);
+			await message.reply(`Usage: \`@${this.client.user?.username || "AutoFeeds"} check <url>\``);
 			return;
 		}
 
@@ -363,28 +364,21 @@ class AutoFeeds {
 			return;
 		}
 
-		await message.reply("Checking feed...");
-		await this.checkFeed(feed, true);
+		await message.reply("⏳ Checking feed...");
+
+		const result = await this.checkFeed(feed, true);
+
+		if (result?.error) {
+			await message.reply("❌ Error checking feed.");
+			return;
+		}
+
+		await message.reply(`Feed checked. ${result.newItemsCount} new items found.`);
 	}
 
 	async handleHelp(message) {
-		const botName = this.client.user?.username;
-		const help = `## AutoFeeds Help
-
-Visit [the documentation](<https://automod.vale.rocks/docs/autofeeds>) for usage information and [the AutoMod server](https://stt.gg/automod) for help.
-
-\`@${botName} add <url>\` - Add an RSS/Atom/JSON feed to this channel
-\`@${botName} remove <url>\` - Remove a feed from this channel
-\`@${botName} list\` - List all feeds in this channel
-\`@${botName} check <url>\` - Manually check a specific feed for new items
-\`@${botName} help\` - Show this help message
-
-**Supported Feed Types:**
-- RSS 2.0
-- Atom 1.0
-- JSON Feed 1.0/1.1
-
-Feeds are automatically checked every 20 minutes.`;
+		const botName = this.client.user?.username || "AutoFeeds";
+		const help = `## AutoFeeds Help\n\nVisit [the documentation](<https://automod.vale.rocks/docs/autofeeds>) for usage information and [the AutoMod server](https://stt.gg/automod) for help.\n\n\`@${botName} add <url>\` - Add an RSS/Atom/JSON feed to this channel\n\`@${botName} remove <url>\` - Remove a feed from this channel\n\`@${botName} list\` - List all feeds in this channel\n\`@${botName} check <url>\` - Manually check a specific feed for new items\n\`@${botName} help\` - Show this help message\n\n**Supported Feed Types:**\n- RSS 2.0\n- Atom 1.0\n- JSON Feed 1.0/1.1\n\nFeeds are automatically checked every 20 minutes or as specified by the feed.`;
 
 		await message.reply(help);
 	}
@@ -414,6 +408,9 @@ Feeds are automatically checked every 20 minutes.`;
 				try {
 					const json = JSON.parse(text);
 					if (json.version && json.version.startsWith("https://jsonfeed.org/version/")) {
+						if (json.expired === true) {
+							return "expired_json";
+						}
 						return "json";
 					}
 				} catch (e) {}
@@ -431,13 +428,32 @@ Feeds are automatically checked every 20 minutes.`;
 		}
 	}
 
+	shouldSkipFeedCheck(feed) {
+		if (feed.nextCheckTime && Date.now() < feed.nextCheckTime) return true;
+
+		const now = new Date();
+
+		if (feed.skipHours && feed.skipHours.includes(now.getUTCHours())) {
+			return true;
+		}
+
+		const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+		const currentDay = days[now.getUTCDay()];
+		if (feed.skipDays && feed.skipDays.includes(currentDay)) {
+			return true;
+		}
+
+		return false;
+	}
+
 	async checkAllFeeds() {
 		console.log(`Checking ${this.feeds.size} feeds...`);
 
 		for (const feed of this.feeds.values()) {
+			if (this.shouldSkipFeedCheck(feed)) continue;
+
 			try {
 				await this.checkFeed(feed);
-				// Small delay between feeds to avoid rate limiting
 				await new Promise((resolve) => setTimeout(resolve, 1000));
 			} catch (error) {
 				console.error(`Error checking feed ${feed.url}:`, error);
@@ -445,33 +461,27 @@ Feeds are automatically checked every 20 minutes.`;
 		}
 	}
 
-	async checkFeed(feed, isManual = false) {
+	async checkFeed(feed) {
 		try {
 			let items = [];
 
 			if (feed.feed_type === "json") {
-				items = await this.parseJsonFeed(feed.url);
+				items = await this.parseJsonFeed(feed);
 			} else {
-				items = await this.parseXmlFeed(feed.url);
+				items = await this.parseXmlFeed(feed);
 			}
 
 			if (items.length === 0) {
-				if (isManual) console.log(`No items found for ${feed.url}`);
-				return;
+				return { newItemsCount: 0 };
 			}
 
 			const [feedRows] = await this.db.execute("SELECT id FROM feeds WHERE url = ? AND channel_id = ?", [feed.url, feed.channel_id]);
-
-			if (feedRows.length === 0) return;
+			if (feedRows.length === 0) return { newItemsCount: 0 };
 			const feedId = feedRows[0].id;
 
-			// Process items (newest first)
 			let newItemsCount = 0;
-
 			for (const item of items.slice(0, 5)) {
-				// Limit to 5 most recent items
 				try {
-					// Try to insert the item. This will fail silently if it already exists
 					const [insertResult] = await this.db.execute("INSERT IGNORE INTO feed_items (feed_id, item_id, title, link, published_at) VALUES (?, ?, ?, ?, ?)", [
 						feedId,
 						item.id ?? null,
@@ -480,7 +490,6 @@ Feeds are automatically checked every 20 minutes.`;
 						item.published ?? null,
 					]);
 
-					// Only post if this is a new item
 					if (insertResult.affectedRows > 0) {
 						await this.postFeedItem(feed, item);
 						newItemsCount++;
@@ -490,14 +499,16 @@ Feeds are automatically checked every 20 minutes.`;
 				}
 			}
 
-			// Update last_updated timestamp
 			await this.db.execute("UPDATE feeds SET last_updated = CURRENT_TIMESTAMP WHERE id = ?", [feedId]);
 
-			if (newItemsCount > 0 || isManual) {
+			if (newItemsCount > 0) {
 				console.log(`Posted ${newItemsCount} new items from ${feed.url}`);
 			}
+
+			return { newItemsCount };
 		} catch (error) {
 			console.error(`Error checking feed ${feed.url}:`, error);
+			return { newItemsCount: 0, error: true };
 		}
 	}
 
@@ -506,9 +517,9 @@ Feeds are automatically checked every 20 minutes.`;
 			let items = [];
 
 			if (feed.feed_type === "json") {
-				items = await this.parseJsonFeed(feed.url);
+				items = await this.parseJsonFeed(feed);
 			} else {
-				items = await this.parseXmlFeed(feed.url);
+				items = await this.parseXmlFeed(feed);
 			}
 
 			if (items.length === 0) return;
@@ -518,43 +529,61 @@ Feeds are automatically checked every 20 minutes.`;
 			if (feedRows.length === 0) return;
 			const feedId = feedRows[0].id;
 
-			// Store existing items without posting them
 			for (const item of items.slice(0, 5)) {
 				try {
-					await this.db.execute("INSERT IGNORE INTO feed_items (feed_id, item_id, title, link, published_at) VALUES (?, ?, ?, ?, ?)", [feedId, item.id, item.title, item.link, item.published]);
+					await this.db.execute("INSERT IGNORE INTO feed_items (feed_id, item_id, title, link, published_at) VALUES (?, ?, ?, ?, ?)", [
+						feedId,
+						item.id ?? null,
+						item.title ?? null,
+						item.link ?? null,
+						item.published ?? null,
+					]);
 				} catch (error) {
 					console.error("Error storing feed item:", error);
 				}
 			}
 
-			// Update last_updated timestamp
 			await this.db.execute("UPDATE feeds SET last_updated = CURRENT_TIMESTAMP WHERE id = ?", [feedId]);
 		} catch (error) {
 			console.error(`Error initialising feed ${feed.url}:`, error);
 		}
 	}
 
-	async parseXmlFeed(url) {
+	async parseXmlFeed(feed) {
 		const controller = new AbortController();
 		const timeout = setTimeout(() => controller.abort(), 10000);
 
 		try {
-			const response = await fetch(url, {
-				headers: {
-					"User-Agent": "AutoFeeds/1.0",
-					"Accept": "application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8",
-				},
-				signal: controller.signal,
-			});
+			const headers = {
+				"User-Agent": "AutoFeeds/1.0",
+				"Accept": "application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8",
+			};
 
-			if (!response.ok) {
-				throw new Error(`HTTP Error ${response.status}: ${response.statusText}`);
-			}
+			if (feed.etag) headers["If-None-Match"] = feed.etag;
+			if (feed.lastModified) headers["If-Modified-Since"] = feed.lastModified;
+
+			const response = await fetch(feed.url, { headers, signal: controller.signal });
+
+			if (response.status === 304) return [];
+			if (!response.ok) throw new Error(`HTTP Error ${response.status}: ${response.statusText}`);
+
+			this.processCacheHeaders(feed, response);
 
 			const text = await response.text();
-			const feed = await this.parser.parseString(text);
+			const feedData = await this.parser.parseString(text);
 
-			return feed.items.map((item) => ({
+			if (feedData.ttl) feed.ttl = parseInt(feedData.ttl, 10);
+			if (feedData.skipHours) feed.skipHours = String(feedData.skipHours).match(/\d+/g)?.map(Number) || [];
+			if (feedData.skipDays) feed.skipDays = String(feedData.skipDays).match(/(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)/gi) || [];
+
+			if (feed.ttl) {
+				const ttlLimit = Date.now() + feed.ttl * 60 * 1000;
+				if (!feed.nextCheckTime || ttlLimit > feed.nextCheckTime) {
+					feed.nextCheckTime = ttlLimit;
+				}
+			}
+
+			return feedData.items.map((item) => ({
 				id: item.guid || item.link || item.title,
 				title: item.title,
 				link: item.link,
@@ -562,30 +591,32 @@ Feeds are automatically checked every 20 minutes.`;
 				published: new Date(item.pubDate || item.isoDate || Date.now()),
 			}));
 		} catch (error) {
-			console.error(`Error parsing XML feed ${url}:`, error.message);
+			console.error(`Error parsing XML feed ${feed.url}:`, error.message);
 			return [];
 		} finally {
 			clearTimeout(timeout);
 		}
 	}
 
-	async parseJsonFeed(url) {
+	async parseJsonFeed(feed) {
 		const controller = new AbortController();
 		const timeout = setTimeout(() => controller.abort(), 10000);
 
 		try {
-			const response = await fetch(url, {
-				headers: { "User-Agent": "AutoFeeds/1.0" },
-				signal: controller.signal,
-			});
+			const headers = { "User-Agent": "AutoFeeds/1.0" };
+			if (feed.etag) headers["If-None-Match"] = feed.etag;
+			if (feed.lastModified) headers["If-Modified-Since"] = feed.lastModified;
 
-			if (!response.ok) {
-				throw new Error(`HTTP Error ${response.status}`);
-			}
+			const response = await fetch(feed.url, { headers, signal: controller.signal });
 
-			const feed = await response.json();
+			if (response.status === 304) return [];
+			if (!response.ok) throw new Error(`HTTP Error ${response.status}`);
 
-			return (feed.items || []).map((item) => ({
+			this.processCacheHeaders(feed, response);
+
+			const feedData = await response.json();
+
+			return (feedData.items || []).map((item) => ({
 				id: item.id || item.url || item.title,
 				title: item.title,
 				link: item.url || item.external_url,
@@ -593,10 +624,33 @@ Feeds are automatically checked every 20 minutes.`;
 				published: new Date(item.date_published || item.date_modified || Date.now()),
 			}));
 		} catch (error) {
-			console.error(`Error parsing JSON feed ${url}:`, error.message);
+			console.error(`Error parsing JSON feed ${feed.url}:`, error.message);
 			return [];
 		} finally {
 			clearTimeout(timeout);
+		}
+	}
+
+	processCacheHeaders(feed, response) {
+		feed.etag = response.headers.get("etag");
+		feed.lastModified = response.headers.get("last-modified");
+
+		const cacheControl = response.headers.get("cache-control");
+		const expires = response.headers.get("expires");
+
+		let maxAge = 0;
+		if (cacheControl) {
+			const match = cacheControl.match(/max-age=(\d+)/);
+			if (match) maxAge = parseInt(match[1], 10);
+		}
+
+		if (maxAge > 0) {
+			feed.nextCheckTime = Date.now() + maxAge * 1000;
+		} else if (expires) {
+			const expiresTime = new Date(expires).getTime();
+			if (!isNaN(expiresTime) && expiresTime > Date.now()) {
+				feed.nextCheckTime = expiresTime;
+			}
 		}
 	}
 
@@ -646,26 +700,28 @@ bot.init().catch((error) => {
 	process.exit(1);
 });
 
-process.on("SIGINT", async () => {
-	console.log("Shutting down bot...");
-	if (bot.db) {
-		try {
-			await bot.db.end();
-		} catch (error) {
-			console.error("Error closing database connection:", error);
-		}
-	}
-	process.exit(0);
-});
+const shutdownHandler = async () => {
+	console.log("Shutting down bot gracefully...");
 
-process.on("SIGTERM", async () => {
-	console.log("Received SIGTERM, shutting down gracefully...");
+	if (bot.client && typeof bot.client.logout === "function") {
+		try {
+			await bot.client.logout();
+		} catch (error) {
+			console.error("Error logging out bot:", error);
+		}
+	}
+
 	if (bot.db) {
 		try {
 			await bot.db.end();
+			console.log("Database connection pool closed.");
 		} catch (error) {
-			console.error("Error closing database connection:", error);
+			console.error("Error closing database connection pool:", error);
 		}
 	}
+
 	process.exit(0);
-});
+};
+
+process.on("SIGINT", shutdownHandler);
+process.on("SIGTERM", shutdownHandler);
