@@ -179,7 +179,9 @@ class AutoFeeds {
 			}
 
 			const member = await message.server.fetchMember(message.authorId);
-			return member.permissions.has("ManageChannel") || member.permissions.has("ManageServer") || member.permissions.has("ManagePermissions");
+			if (!member) return false;
+
+			return member.hasPermission(message.server, "ManageServer") || member.hasPermission(message.server, "ManageChannel");
 		} catch (error) {
 			console.error("Error checking moderator status:", error);
 			return false;
@@ -239,7 +241,7 @@ class AutoFeeds {
 
 	async handleAddFeed(message, args) {
 		if (!(await this.isUserModerator(message))) {
-			await message.reply("Only moderators may add feeds.");
+			await message.reply("❌ You lack the permissions required add feeds.");
 			return;
 		}
 
@@ -364,7 +366,7 @@ class AutoFeeds {
 			return;
 		}
 
-		await message.reply("⏳ Checking feed...");
+		await message.reply("⏳ Checking feed…");
 
 		const result = await this.checkFeed(feed, true);
 
@@ -391,7 +393,7 @@ class AutoFeeds {
 
 		try {
 			const controller = new AbortController();
-			const timeout = setTimeout(() => controller.abort(), 10000);
+			const timeout = setTimeout(() => controller.abort(), 5000);
 
 			const response = await fetch(url, {
 				headers: { "User-Agent": "AutoFeeds/1.0" },
@@ -556,7 +558,8 @@ class AutoFeeds {
 		try {
 			const headers = {
 				"User-Agent": "AutoFeeds/1.0",
-				"Accept": "application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8",
+				"Accept":
+					"application/rss+xml, application/xml, application/atom+xml, application/rdf+xml;q=0.9, application/xml;q=0.8, text/xml;q=0.8, text/html;q=0.7, unknown/unknown;q=0.1, application/unknown;q=0.1, */*;q=0.1",
 			};
 
 			if (feed.etag) headers["If-None-Match"] = feed.etag;
@@ -674,7 +677,7 @@ class AutoFeeds {
 
 		if (item.description) {
 			const description = item.description.substring(0, 200);
-			message += `${description}${description.length === 200 ? "..." : ""}\n\n`;
+			message += `${description}${description.length === 200 ? "…" : ""}\n`;
 		}
 
 		if (item.link) {
