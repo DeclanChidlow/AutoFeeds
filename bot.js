@@ -14,6 +14,7 @@ class AutoFeeds {
 		});
 		this.db = null;
 		this.feeds = new Map();
+		this.notifiedOwners = new Set();
 		this.setupErrorHandlers();
 	}
 
@@ -139,7 +140,6 @@ class AutoFeeds {
 		const statusText = `@${botName} help | Handling ${this.feeds.size} feeds`;
 
 		try {
-			// Ensure user object exists before sending PATCH
 			if (!this.client.user) {
 				await new Promise((resolve) => setTimeout(resolve, 1000));
 			}
@@ -188,6 +188,62 @@ class AutoFeeds {
 		}
 	}
 
+	async getDmChannel(userOrId) {
+		let user = userOrId;
+		if (typeof user === "string") {
+			user = this.client.users.get(user) || (await this.client.users.fetch(user));
+		} else if (user && !user.openDM && user.id) {
+			user = this.client.users.get(user.id) || (await this.client.users.fetch(user.id));
+		}
+
+		if (!user) throw new Error("Could not resolve user");
+
+		const channels = Array.from(this.client.channels.values());
+		const existingDM = channels.find((c) => c.type === "DirectMessage" && c.recipient?.id === user.id);
+
+		return existingDM || (await user.openDM());
+	}
+
+	async safeReply(message, content) {
+		try {
+			await message.reply(content);
+		} catch (error) {
+			console.log(`Failed to reply in channel ${message.channelId}, notifying in DM`);
+			try {
+				const dmChannel = await this.getDmChannel(message.authorId);
+				await dmChannel.sendMessage(
+					`⚠️ AutoFeeds acted on your command in <#${message.channelId}> and tried to reply but couldn't due to not having the required permissions.\nYou can consult the setup documentation here: https://automod.vale.rocks/docs/autofeeds/setup`,
+				);
+			} catch (dmError) {
+				console.error("Failed to send message failure DM to user:", dmError);
+			}
+		}
+	}
+
+	async notifyServerOwner(feed) {
+		const cacheKey = `${feed.server_id}-${feed.channel_id}`;
+		if (this.notifiedOwners.has(cacheKey)) return;
+
+		try {
+			let server = this.client.servers.get(feed.server_id);
+			if (!server) {
+				server = await this.client.servers.fetch(feed.server_id).catch(() => null);
+			}
+			if (!server || !server.ownerId) return;
+
+			const dmChannel = await this.getDmChannel(server.ownerId);
+			await dmChannel.sendMessage(
+				`⚠️ AutoFeeds tried to post a feed update to <#${feed.channel_id}> for \`${feed.url}\`, but it failed. This is likely due to not having the required permissions.\nYou can consult the setup documentation here: https://automod.vale.rocks/docs/autofeeds/setup`,
+			);
+
+			this.notifiedOwners.add(cacheKey);
+
+			setTimeout(() => this.notifiedOwners.delete(cacheKey), 86400000);
+		} catch (err) {
+			console.error("Failed to notify server owner:", err);
+		}
+	}
+
 	setupCommands() {
 		this.client.on("messageCreate", async (message) => {
 			try {
@@ -229,11 +285,12 @@ class AutoFeeds {
 						break;
 				}
 			} catch (error) {
-				console.error("Command error:", error);
-				try {
-					await message.reply("An error occurred while processing your command.");
-				} catch (replyError) {
-					console.error("Failed to send error reply:", replyError);
+				if (error.type === "MissingPermission") {
+					const urlAttempt = message.content.split(/\s+/)[2];
+					await this.safeReply(message, "", urlAttempt);
+				} else {
+					console.error("Command error:", error);
+					await this.safeReply(message, "❌ An error occurred while processing your command.");
 				}
 			}
 		});
@@ -241,12 +298,12 @@ class AutoFeeds {
 
 	async handleAddFeed(message, args) {
 		if (!(await this.isUserModerator(message))) {
-			await message.reply("❌ You lack the permissions required add feeds.");
+			await this.safeReply(message, "❌ You lack the permissions required to add feeds.");
 			return;
 		}
 
 		if (args.length < 2) {
-			await message.reply(`Usage: \`@${this.client.user?.username || "AutoFeeds"} add <url>\``);
+			await this.safeReply(message, `Usage: \`@${this.client.user?.username || "AutoFeeds"} add <url>\``);
 			return;
 		}
 
@@ -255,25 +312,40 @@ class AutoFeeds {
 		const serverId = message.channel?.server?.id;
 
 		if (!serverId) {
-			await message.reply("This command can only be used in server channels.");
+			await this.safeReply(message, "This command can only be used in server channels.");
 			return;
 		}
 
 		if (this.feeds.has(`${url}-${channelId}`)) {
-			await message.reply("⚠️ This feed is already configured for this channel.");
+			await this.safeReply(message, "⚠️ This feed is already configured for this channel.");
 			return;
 		}
 
 		try {
-			const feedType = await this.detectFeedType(url);
+			const detectResult = await this.detectFeedType(url);
+
+			if (detectResult?.error) {
+				if (detectResult.error === 402) {
+					await this.safeReply(message, "❌ Cannot add feed: Payment Required (HTTP 402). The feed publisher requires payment or authentication to access this feed.");
+					return;
+				} else if (detectResult.error === 404) {
+					await this.safeReply(message, "❌ Cannot add feed: Not Found (HTTP 404). The feed URL does not exist.");
+					return;
+				} else {
+					await this.safeReply(message, `❌ Invalid feed URL or unsupported format (HTTP ${detectResult.error}).`);
+					return;
+				}
+			}
+
+			const feedType = detectResult.type;
 
 			if (feedType === "expired_json") {
-				await message.reply("Cannot add feed: This JSON feed has been marked as 'expired' by its publisher, meaning it will no longer be updated.");
+				await this.safeReply(message, "Cannot add feed: This JSON feed has been marked as 'expired' by its publisher, meaning it will no longer be updated.");
 				return;
 			}
 
 			if (!feedType) {
-				await message.reply("Invalid feed URL or unsupported feed format.");
+				await this.safeReply(message, "Invalid feed URL or unsupported feed format.");
 				return;
 			}
 
@@ -282,16 +354,16 @@ class AutoFeeds {
 			const feed = { url, channel_id: channelId, server_id: serverId, feed_type: feedType };
 			this.feeds.set(`${url}-${channelId}`, feed);
 
-			await message.reply(`✅ Added ${feedType.toUpperCase()} feed: ${url}`);
+			await this.safeReply(message, `✅ Added ${feedType.toUpperCase()} feed: ${url}`);
 			this.setBotStatus();
 
 			await this.initialiseFeed(feed);
 		} catch (error) {
 			console.error("Error adding feed:", error);
 			if (error.code === "ER_DUP_ENTRY") {
-				await message.reply("⚠️ This feed is already added to this channel.");
+				await this.safeReply(message, "⚠️ This feed is already added to this channel.");
 			} else {
-				await message.reply("❌ Failed to add feed. Please check the URL and try again.");
+				await this.safeReply(message, "❌ Failed to add feed. Please check the URL and try again.");
 			}
 		}
 	}
@@ -388,7 +460,7 @@ class AutoFeeds {
 	async detectFeedType(url) {
 		if (!url || typeof url !== "string" || url.trim() === "") {
 			console.error("detectFeedType called with invalid URL:", url);
-			return null;
+			return { error: "invalid_url" };
 		}
 
 		try {
@@ -401,7 +473,9 @@ class AutoFeeds {
 			});
 			clearTimeout(timeout);
 
-			if (!response.ok) return null;
+			if (!response.ok) {
+				return { error: response.status };
+			}
 
 			const contentType = response.headers.get("content-type") || "";
 			const text = await response.text();
@@ -411,22 +485,22 @@ class AutoFeeds {
 					const json = JSON.parse(text);
 					if (json.version && json.version.startsWith("https://jsonfeed.org/version/")) {
 						if (json.expired === true) {
-							return "expired_json";
+							return { type: "expired_json" };
 						}
-						return "json";
+						return { type: "json" };
 					}
 				} catch (e) {}
 			}
 
 			if (text.includes("<rss") || text.includes("<feed")) {
-				if (text.includes("<rss")) return "rss";
-				if (text.includes("<feed") && text.includes('xmlns="http://www.w3.org/2005/Atom"')) return "atom";
+				if (text.includes("<rss")) return { type: "rss" };
+				if (text.includes("<feed") && text.includes('xmlns="http://www.w3.org/2005/Atom"')) return { type: "atom" };
 			}
 
-			return null;
+			return { type: null };
 		} catch (error) {
 			console.error("Error detecting feed type:", error);
-			return null;
+			return { error: "fetch_failed" };
 		}
 	}
 
@@ -659,7 +733,11 @@ class AutoFeeds {
 
 	async postFeedItem(feed, item) {
 		try {
-			const channel = this.client.channels.get(feed.channel_id);
+			let channel = this.client.channels.get(feed.channel_id);
+			if (!channel) {
+				channel = await this.client.channels.fetch(feed.channel_id).catch(() => null);
+			}
+
 			if (!channel) {
 				console.error(`Channel ${feed.channel_id} not found`);
 				return;
@@ -669,6 +747,7 @@ class AutoFeeds {
 			await channel.sendMessage(message);
 		} catch (error) {
 			console.error("Error posting feed item:", error);
+			await this.notifyServerOwner(feed);
 		}
 	}
 
