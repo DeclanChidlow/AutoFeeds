@@ -9,7 +9,7 @@
 	},
 	"dependencies": {
 		"stoat.js": "^7.3.6",
-		"mysql2": "^3.17.0",
+		"mysql2": "^3.18.0",
 		"rss-parser": "^3.13.0",
 		"node-cron": "^4.2.1"
 	},
