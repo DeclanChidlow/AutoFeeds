@@ -1,6 +1,6 @@
 services:
   mariadb:
-    image: mariadb:11.4.7
+    image: mariadb:12.2.2
     container_name: autofeeds-db
     restart: unless-stopped
     environment:
