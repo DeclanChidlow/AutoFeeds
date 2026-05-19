@@ -24,7 +24,8 @@ class AutoFeeds {
 		});
 
 		this.client.on("disconnect", () => {
-			console.log("Bot disconnected from Stoat");
+			console.log("Bot disconnected from Stoat. Exiting to allow Docker restart.");
+			process.exit(1);
 		});
 
 		this.client.on("ready", () => {
@@ -33,10 +34,12 @@ class AutoFeeds {
 
 		process.on("uncaughtException", (error) => {
 			console.error("Uncaught Exception:", error);
+			process.exit(1);
 		});
 
 		process.on("unhandledRejection", (reason, promise) => {
 			console.error("Unhandled Rejection at:", promise, "reason:", reason);
+			process.exit(1);
 		});
 	}
 
@@ -96,6 +99,8 @@ class AutoFeeds {
 					waitForConnections: true,
 					connectionLimit: 10,
 					queueLimit: 0,
+					enableKeepAlive: true,
+					keepAliveInitialDelay: 10000,
 				});
 
 				await this.db.execute("SELECT 1");
@@ -277,6 +282,9 @@ class AutoFeeds {
 					case "check":
 						await this.handleCheckFeed(message, args);
 						break;
+					case "ping":
+						await this.handlePing(message);
+						break;
 					case "help":
 						await this.handleHelp(message);
 						break;
@@ -450,9 +458,41 @@ class AutoFeeds {
 		await message.reply(`Feed checked. ${result.newItemsCount} new items found.`);
 	}
 
+	async handlePing(message) {
+		const now = Date.now();
+
+		const wsPing = this.client.events.ping();
+		const wsDisplay = wsPing === null || wsPing < 0 ? "`Reconnecting/Syncing…`" : `\`${wsPing}ms\``;
+
+		const uptime = process.uptime();
+		const d = Math.floor(uptime / 86400);
+		const h = Math.floor((uptime % 86400) / 3600);
+		const m = Math.floor((uptime % 3600) / 60);
+		const s = Math.floor(uptime % 60);
+
+		let uptimeStr = "";
+		if (d > 0) uptimeStr += `${d}d `;
+		if (h > 0) uptimeStr += `${h}h `;
+		if (m > 0) uptimeStr += `${m}m `;
+		if (uptime < 300) uptimeStr += `${s}s`;
+
+		try {
+			const msg = await message.reply("⌛ Measuring...");
+
+			if (msg) {
+				const messagePing = Math.round(Date.now() - now);
+				const content = ["## Ping Pong!", `WebSocket: ${wsDisplay}`, `Message: \`${messagePing}ms\``, `Uptime: \`${uptimeStr.trim() || "0s"}\``].join("\n");
+
+				await msg.edit({ content });
+			}
+		} catch (error) {
+			console.error("Ping error:", error);
+		}
+	}
+
 	async handleHelp(message) {
 		const botName = this.client.user?.username || "AutoFeeds";
-		const help = `## AutoFeeds Help\n\nVisit [the documentation](<https://automod.vale.rocks/docs/autofeeds>) for usage information and [the AutoMod server](https://stt.gg/automod) for help.\n\n\`@${botName} add <url>\` - Add an RSS/Atom/JSON feed to this channel\n\`@${botName} remove <url>\` - Remove a feed from this channel\n\`@${botName} list\` - List all feeds in this channel\n\`@${botName} check <url>\` - Manually check a specific feed for new items\n\`@${botName} help\` - Show this help message\n\n**Supported Feed Types:**\n- RSS 2.0\n- Atom 1.0\n- JSON Feed 1.0/1.1\n\nFeeds are automatically checked every 20 minutes or as specified by the feed.`;
+		const help = `## AutoFeeds Help\n\nVisit [the documentation](<https://automod.vale.rocks/docs/autofeeds>) for usage information and [the AutoMod server](https://stt.gg/automod) for help.\n\n\`@${botName} add <url>\` - Add an RSS/Atom/JSON feed to this channel\n\`@${botName} remove <url>\` - Remove a feed from this channel\n\`@${botName} list\` - List all feeds in this channel\n\`@${botName} check <url>\` - Manually check a specific feed for new items\n\`@${botName} ping\` - Check bot latency and uptime\n\`@${botName} help\` - Show this help message\n\n**Supported Feed Types:**\n- RSS 2.0\n- Atom 1.0\n- JSON Feed 1.0/1.1\n\nFeeds are automatically checked every 20 minutes or as specified by the feed.`;
 
 		await message.reply(help);
 	}
