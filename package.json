@@ -2,16 +2,16 @@
 	"name": "autofeeds",
 	"version": "1.0.0",
 	"description": "A feed bot for Stoat that supports RSS, Atom, and JSON feeds.",
-	"main": "bot.js",
+	"main": "main.js",
 	"scripts": {
-		"start": "bun bot.js",
-		"dev": "bun bot.js"
+		"start": "bun main.js",
+		"dev": "bun main.js"
 	},
 	"dependencies": {
-		"stoat.js": "^7.3.6",
-		"mysql2": "^3.22.3",
+		"json-with-bigint": "^3.5.8",
+		"mysql2": "^3.22.6",
 		"rss-parser": "^3.13.0",
-		"node-cron": "^4.2.1"
+		"node-cron": "^4.6.0"
 	},
 	"keywords": [
 		"stoat",
