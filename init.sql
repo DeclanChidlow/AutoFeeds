@@ -8,13 +8,26 @@ CREATE TABLE IF NOT EXISTS feeds (
     url VARCHAR(512) NOT NULL,
     channel_id VARCHAR(26) NOT NULL,
     server_id VARCHAR(26) NOT NULL,
-    feed_type ENUM('rss', 'atom', 'json') NOT NULL,
+    feed_type ENUM('rss', 'atom', 'json', 'podcast') NOT NULL,
+    template TEXT NULL,
     last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY unique_feed_channel (url, channel_id),
     INDEX idx_channel_id (channel_id),
     INDEX idx_server_id (server_id),
     INDEX idx_last_updated (last_updated)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS feed_filters (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    feed_id INT NOT NULL,
+    field_name VARCHAR(32) NOT NULL,
+    operator VARCHAR(16) NOT NULL,
+    filter_value VARCHAR(256),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (feed_id) REFERENCES feeds(id) ON DELETE CASCADE,
+    UNIQUE KEY unique_rule (feed_id, field_name, operator, filter_value),
+    INDEX idx_feed_id (feed_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS feed_items (

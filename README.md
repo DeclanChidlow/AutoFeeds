@@ -6,11 +6,13 @@ Feed bot for Stoat
 </div>
 <br/>
 
-A syndication feed bot for [Stoat](https://stoat.chat) that supports RSS, Atom, and JSON feeds. The bot automatically fetches feeds and posts new items.
+A syndication feed bot for [Stoat](https://stoat.chat) that supports RSS, Atom, JSON, and podcast feeds. The bot automatically fetches feeds and posts new items.
 
 ## Features
 
-- [x] Support for RSS, Atom, and JSON feeds
+- [x] Support for RSS, Atom, JSON, and podcast feeds
+- [x] Per-feed filtering of items by field content or existence
+- [x] Per-feed post templates with variables
 - [x] Automatic feed checking
 - [x] Manual forced feed checking
 - [x] Duplicate detection to prevent spam

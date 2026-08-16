@@ -1,8 +1,26 @@
 "use strict";
 
-const { verboseLog } = require("./utils");
+import type Parser from "rss-parser";
+import type { Ctx, Feed, FeedItem, FilterRule } from "./types";
+import { verboseLog } from "./utils";
+import { renderTemplate } from "./templates";
 
-async function detectFeedType(url) {
+class FeedGoneError extends Error {
+	feedGone = true;
+	status: number;
+
+	constructor(message: string, status: number) {
+		super(message);
+		this.status = status;
+	}
+}
+
+function looksLikePodcast(text: string): boolean {
+	if (/xmlns:itunes|xmlns:podcast|<\/?itunes:|<\/?podcast:/i.test(text)) return true;
+	return /<enclosure[^>]*type=["']audio\//i.test(text);
+}
+
+async function detectFeedType(url: string): Promise<{ type?: string | null; error?: string | number }> {
 	if (!url || typeof url !== "string" || url.trim() === "") {
 		console.error("detectFeedType called with invalid URL:", url);
 		return { error: "invalid_url" };
@@ -26,7 +44,7 @@ async function detectFeedType(url) {
 		// JSON Feed
 		if (contentType.includes("application/json") || text.trim().startsWith("{")) {
 			try {
-				const json = JSON.parse(text);
+				const json = JSON.parse(text) as { version?: string; expired?: boolean };
 				if (json.version && json.version.startsWith("https://jsonfeed.org/version/")) {
 					return json.expired === true ? { type: "expired_json" } : { type: "json" };
 				}
@@ -37,7 +55,7 @@ async function detectFeedType(url) {
 
 		// XML feeds
 		if (text.includes("<rss") || text.includes("<feed")) {
-			if (text.includes("<rss")) return { type: "rss" };
+			if (text.includes("<rss")) return { type: looksLikePodcast(text) ? "podcast" : "rss" };
 			if (text.includes("<feed") && text.includes('xmlns="http://www.w3.org/2005/Atom"')) return { type: "atom" };
 		}
 
@@ -48,7 +66,7 @@ async function detectFeedType(url) {
 	}
 }
 
-function shouldSkipFeedCheck(feed) {
+function shouldSkipFeedCheck(feed: Feed): boolean {
 	if (feed.nextCheckTime && Date.now() < feed.nextCheckTime) return true;
 
 	const now = new Date();
@@ -61,7 +79,7 @@ function shouldSkipFeedCheck(feed) {
 	return false;
 }
 
-function processCacheHeaders(feed, response) {
+function processCacheHeaders(feed: Feed, response: Response): void {
 	feed.etag = response.headers.get("etag");
 	feed.lastModified = response.headers.get("last-modified");
 
@@ -85,38 +103,119 @@ function processCacheHeaders(feed, response) {
 }
 
 /**
- * Build a safe Date from a feed date string. Returns Date.now() if the input
- * is missing, empty, or unparseable (to avoid Invalid Date objects).
+ * Build a safe Date from a feed date string. Returns Date.now() if the input is missing, empty, or unparseable (to avoid Invalid Date objects).
  */
-function safeFeedDate(...candidates) {
+function safeFeedDate(...candidates: unknown[]): Date {
 	for (const c of candidates) {
 		if (!c) continue;
-		const d = new Date(c);
+		const d = new Date(c as string);
 		if (!isNaN(d.getTime())) return d;
 	}
 	return new Date();
 }
 
-function formatFeedMessage(item) {
+function formatFeedMessage(item: FeedItem, feed?: Feed): string {
+	if (feed?.template) {
+		const rendered = renderTemplate(feed.template, item);
+		if (rendered) return rendered;
+	}
+
 	const title = (item.title || "").substring(0, 300);
-	const parts = [`**${title}${item.title && item.title.length > 300 ? "…" : ""}**`];
+	const parts: string[] = [`**${title}${item.title && item.title.length > 300 ? "…" : ""}**`];
 
 	if (item.description) {
 		const description = item.description.substring(0, 200);
 		parts.push(`${description}${description.length === 200 ? "…" : ""}`);
 	}
 
+	if (item.isPodcast) {
+		const meta: string[] = [];
+		if (item.episodeType && String(item.episodeType).toLowerCase() !== "full") meta.push(String(item.episodeType));
+		if (item.seasonNumber) meta.push(`Season ${item.seasonNumber}`);
+		if (item.episodeNumber) meta.push(`Episode ${item.episodeNumber}`);
+		if (item.duration) meta.push(item.duration);
+		if (meta.length) parts.push(`🎙️ ${meta.join(" · ")}`);
+	}
+
 	if (item.link) parts.push(`🔗: ${item.link}`);
+	if (item.isPodcast && item.audioUrl) parts.push(`🎧: ${item.audioUrl}`);
 
 	return parts.join("\n");
 }
 
-async function parseXmlFeed(parser, feed) {
+/**
+ * Normalise an itunes:duration value ("1234", "12:34", or "1:12:34") to a display-friendly h:mm:ss / m:ss string. Returns null for invalid values.
+ */
+function formatItunesDuration(raw: unknown): string | null {
+	if (raw === null || raw === undefined) return null;
+
+	const str = String(raw).trim();
+	if (!str) return null;
+
+	let seconds: number;
+	if (/^\d+(\.\d+)?$/.test(str)) {
+		seconds = Math.round(parseFloat(str));
+	} else {
+		const parts = str.split(":").map((p) => parseInt(p, 10));
+		if (parts.length === 0 || parts.length > 3 || parts.some((p) => isNaN(p))) return null;
+		seconds = parts.length === 3 ? parts[0] * 3600 + parts[1] * 60 + parts[2] : parts.length === 2 ? parts[0] * 60 + parts[1] : parts[0];
+	}
+
+	if (!seconds || seconds <= 0) return null;
+
+	const h = Math.floor(seconds / 3600);
+	const m = Math.floor((seconds % 3600) / 60);
+	const s = seconds % 60;
+	return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}` : `${m}:${String(s).padStart(2, "0")}`;
+}
+
+const FILTER_FIELDS: Record<string, keyof FeedItem> = {
+	title: "title",
+	body: "description",
+	description: "description",
+	link: "link",
+	audio: "audioUrl",
+	duration: "duration",
+	episode: "episodeNumber",
+	season: "seasonNumber",
+	type: "episodeType",
+};
+
+const FILTER_OPERATORS = ["contains", "equals", "missing", "present"];
+
+function shouldBlockItem(item: FeedItem, rules: FilterRule[]): boolean {
+	return rules.some((rule) => ruleMatchesItem(rule, item));
+}
+
+function ruleMatchesItem(rule: FilterRule, item: FeedItem): boolean {
+	const field = FILTER_FIELDS[String(rule.field_name || "").toLowerCase()];
+	if (!field) return false;
+
+	const raw = item[field];
+	const value = raw === null || raw === undefined ? "" : String(raw);
+
+	switch (String(rule.operator || "").toLowerCase()) {
+		case "contains": {
+			const needle = String(rule.filter_value || "").toLowerCase();
+			return needle !== "" && value !== "" && value.toLowerCase().includes(needle);
+		}
+		case "equals":
+			return value.toLowerCase() === String(rule.filter_value || "").toLowerCase();
+		case "missing":
+			return value === "";
+		case "present":
+			return value !== "";
+		default:
+			return false;
+	}
+}
+
+async function parseXmlFeed(parser: Parser, feed: Feed): Promise<FeedItem[]> {
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), 10000);
 
 	try {
-		const headers = {
+		const headers: Record<string, string> = {
 			"User-Agent": "AutoFeeds/1.0",
 			"Accept":
 				"application/rss+xml, application/xml, application/atom+xml, application/rdf+xml;q=0.9, application/xml;q=0.8, text/xml;q=0.8, text/html;q=0.7, unknown/unknown;q=0.1, application/unknown;q=0.1, */*;q=0.1",
@@ -128,12 +227,7 @@ async function parseXmlFeed(parser, feed) {
 		const response = await fetch(feed.url, { headers, signal: controller.signal });
 
 		if (response.status === 304) return [];
-		if (response.status === 402) {
-			const err = new Error(`Feed ${feed.url} returned HTTP 402`);
-			err.feedGone = true;
-			err.status = 402;
-			throw err;
-		}
+		if (response.status === 402) throw new FeedGoneError(`Feed ${feed.url} returned HTTP 402`, 402);
 		if (response.status === 429) return [];
 		if (!response.ok) throw new Error(`HTTP Error ${response.status}: ${response.statusText}`);
 
@@ -157,63 +251,101 @@ async function parseXmlFeed(parser, feed) {
 			if (!feed.nextCheckTime || ttlLimit > feed.nextCheckTime) feed.nextCheckTime = ttlLimit;
 		}
 
-		return feedData.items.map((item) => ({
-			id: item.guid || item.link || item.title,
-			title: item.title,
-			link: item.link,
-			description: item.contentSnippet || item.content,
-			published: safeFeedDate(item.pubDate, item.isoDate),
-		}));
+		const feedTitle = feedData.title || null;
+		const feedLink = feedData.link || null;
+
+		return feedData.items.map((item: any): FeedItem => {
+			const enclosure = item.enclosure || null;
+			const mapped: FeedItem = {
+				id: item.guid || item.link || item.title,
+				title: item.title,
+				link: item.link,
+				description: item.contentSnippet || item.content,
+				bodyHtml: item.content || null,
+				published: safeFeedDate(item.pubDate, item.isoDate),
+				author: item.creator || item.author || item.itunesAuthor || null,
+				categories: Array.isArray(item.categories) ? item.categories : [],
+				audioUrl: enclosure?.url || null,
+				audioType: enclosure?.type || null,
+				audioLength: enclosure?.length ?? null,
+				feedTitle,
+				feedLink,
+			};
+
+			if (feed.feed_type === "podcast") {
+				mapped.isPodcast = true;
+				mapped.episodeType = item.itunesEpisodeType || null;
+				mapped.episodeNumber = item.itunesEpisode ?? item.podcastEpisode ?? null;
+				mapped.seasonNumber = item.itunesSeason ?? item.podcastSeason ?? null;
+				mapped.duration = formatItunesDuration(item.itunesDuration);
+			}
+
+			return mapped;
+		});
 	} catch (error) {
-		console.error(`Error parsing XML feed ${feed.url}:`, error.message);
+		console.error(`Error parsing XML feed ${feed.url}:`, (error as Error).message);
 		return [];
 	} finally {
 		clearTimeout(timeout);
 	}
 }
 
-async function parseJsonFeed(feed) {
+async function parseJsonFeed(feed: Feed): Promise<FeedItem[]> {
 	const controller = new AbortController();
 	const timeout = setTimeout(() => controller.abort(), 10000);
 
 	try {
-		const headers = { "User-Agent": "AutoFeeds/1.0" };
+		const headers: Record<string, string> = { "User-Agent": "AutoFeeds/1.0" };
 		if (feed.etag) headers["If-None-Match"] = feed.etag;
 		if (feed.lastModified) headers["If-Modified-Since"] = feed.lastModified;
 
 		const response = await fetch(feed.url, { headers, signal: controller.signal });
 
 		if (response.status === 304) return [];
-		if (response.status === 402) {
-			const err = new Error(`Feed ${feed.url} returned HTTP 402`);
-			err.feedGone = true;
-			err.status = 402;
-			throw err;
-		}
+		if (response.status === 402) throw new FeedGoneError(`Feed ${feed.url} returned HTTP 402`, 402);
 		if (response.status === 429) return [];
 		if (!response.ok) throw new Error(`HTTP Error ${response.status}`);
 
-		const feedData = await response.json();
+		const feedData = (await response.json()) as any;
 
 		// Only update cache headers after a successful parse
 		processCacheHeaders(feed, response);
 
-		return (feedData.items || []).map((item) => ({
-			id: item.id || item.url || item.title,
-			title: item.title,
-			link: item.url || item.external_url,
-			description: item.summary || item.content_text,
-			published: safeFeedDate(item.date_published, item.date_modified),
-		}));
+		const feedTitle = feedData.title || null;
+		const feedLink = feedData.home_page_url || feedData.feed_url || null;
+
+		return (feedData.items || []).map((item: any): FeedItem => {
+			const mapped: FeedItem = {
+				id: item.id || item.url || item.title,
+				title: item.title,
+				link: item.url || item.external_url,
+				description: item.summary || item.content_text,
+				bodyHtml: item.content_html || null,
+				published: safeFeedDate(item.date_published, item.date_modified),
+				author: item.author?.name || item.author || null,
+				categories: Array.isArray(item.tags) ? item.tags : [],
+				feedTitle,
+				feedLink,
+			};
+
+			const audioAttachment = (item.attachments || []).find((a: any) => String(a.mime_type || "").startsWith("audio/"));
+			if (audioAttachment) {
+				mapped.audioUrl = audioAttachment.url;
+				mapped.audioType = audioAttachment.mime_type || null;
+				mapped.audioLength = audioAttachment.size_in_bytes ?? null;
+			}
+
+			return mapped;
+		});
 	} catch (error) {
-		console.error(`Error parsing JSON feed ${feed.url}:`, error.message);
+		console.error(`Error parsing JSON feed ${feed.url}:`, (error as Error).message);
 		return [];
 	} finally {
 		clearTimeout(timeout);
 	}
 }
 
-async function checkAllFeeds(ctx) {
+async function checkAllFeeds(ctx: Ctx): Promise<void> {
 	const { feeds } = ctx;
 	verboseLog(`Checking ${feeds.size} feeds...`);
 
@@ -229,8 +361,8 @@ async function checkAllFeeds(ctx) {
 	}
 }
 
-async function _processFeedItems(ctx, feed, shouldPost) {
-	let items = [];
+async function _processFeedItems(ctx: Ctx, feed: Feed, shouldPost: boolean): Promise<{ newItemsCount: number } | undefined> {
+	let items: FeedItem[] = [];
 
 	if (feed.feed_type === "json") {
 		items = await parseJsonFeed(feed);
@@ -240,22 +372,28 @@ async function _processFeedItems(ctx, feed, shouldPost) {
 
 	if (items.length === 0) return shouldPost ? { newItemsCount: 0 } : undefined;
 
-	const [feedRows] = await ctx.db.execute("SELECT id FROM feeds WHERE url = ? AND channel_id = ?", [feed.url, feed.channel_id]);
+	const [feedRows] = (await ctx.db.execute("SELECT id FROM feeds WHERE url = ? AND channel_id = ?", [feed.url, feed.channel_id])) as [{ id: number }[], unknown];
 	if (feedRows.length === 0) return shouldPost ? { newItemsCount: 0 } : undefined;
 	const feedId = feedRows[0].id;
+
+	const [filterRows] = (await ctx.db.execute("SELECT id, field_name, operator, filter_value FROM feed_filters WHERE feed_id = ?", [feedId])) as [FilterRule[], unknown];
 
 	let newItemsCount = 0;
 	for (const item of items.slice(0, 5)) {
 		try {
-			const [insertResult] = await ctx.db.execute("INSERT IGNORE INTO feed_items (feed_id, item_id, title, link, published_at) VALUES (?, ?, ?, ?, ?)", [
+			// Blocked items are still recorded as seen so removing a filter
+			// later doesn't re-post old items.
+			const blocked = shouldBlockItem(item, filterRows);
+
+			const [insertResult] = (await ctx.db.execute("INSERT IGNORE INTO feed_items (feed_id, item_id, title, link, published_at) VALUES (?, ?, ?, ?, ?)", [
 				feedId,
 				item.id ?? null,
 				item.title ?? null,
 				item.link ?? null,
 				item.published ?? null,
-			]);
+			])) as [{ affectedRows: number }, unknown];
 
-			if (insertResult.affectedRows > 0 && shouldPost) {
+			if (insertResult.affectedRows > 0 && shouldPost && !blocked) {
 				await postFeedItem(ctx, feed, item);
 				newItemsCount++;
 			}
@@ -271,7 +409,7 @@ async function _processFeedItems(ctx, feed, shouldPost) {
 	return shouldPost ? { newItemsCount } : undefined;
 }
 
-async function _removeFeedAndNotify(ctx, feed, status) {
+async function _removeFeedAndNotify(ctx: Ctx, feed: Feed, status: number): Promise<void> {
 	const reason = "now requires payment";
 	console.log(`Feed ${feed.url} ${reason} — removing`);
 
@@ -290,11 +428,11 @@ async function _removeFeedAndNotify(ctx, feed, status) {
 	}
 }
 
-async function checkFeed(ctx, feed) {
+async function checkFeed(ctx: Ctx, feed: Feed): Promise<{ newItemsCount: number; error?: boolean }> {
 	try {
-		return await _processFeedItems(ctx, feed, true);
+		return (await _processFeedItems(ctx, feed, true)) ?? { newItemsCount: 0 };
 	} catch (error) {
-		if (error.feedGone) {
+		if (error instanceof FeedGoneError) {
 			await _removeFeedAndNotify(ctx, feed, error.status);
 			return { newItemsCount: 0, error: true };
 		}
@@ -303,7 +441,7 @@ async function checkFeed(ctx, feed) {
 	}
 }
 
-async function initialiseFeed(ctx, feed) {
+async function initialiseFeed(ctx: Ctx, feed: Feed): Promise<void> {
 	try {
 		await _processFeedItems(ctx, feed, false);
 	} catch (error) {
@@ -311,7 +449,7 @@ async function initialiseFeed(ctx, feed) {
 	}
 }
 
-async function postFeedItem(ctx, feed, item) {
+async function postFeedItem(ctx: Ctx, feed: Feed, item: FeedItem): Promise<void> {
 	try {
 		const channelData = await ctx.stoat.getChannel(feed.channel_id);
 		if (!channelData) {
@@ -322,14 +460,14 @@ async function postFeedItem(ctx, feed, item) {
 			return;
 		}
 
-		await ctx.stoat.sendMessage(channelData._id, formatFeedMessage(item));
+		await ctx.stoat.sendMessage(channelData._id, formatFeedMessage(item, feed));
 	} catch (error) {
 		console.error("Error posting feed item:", error);
 		await notifyServerOwner(ctx, feed);
 	}
 }
 
-async function notifyServerOwner(ctx, feed) {
+async function notifyServerOwner(ctx: Ctx, feed: Feed): Promise<void> {
 	const cacheKey = `${feed.server_id}-${feed.channel_id}`;
 	if (ctx.notifiedOwners.has(cacheKey)) return;
 
@@ -349,8 +487,9 @@ async function notifyServerOwner(ctx, feed) {
 	}
 }
 
-module.exports = {
+export {
 	detectFeedType,
+	looksLikePodcast,
 	shouldSkipFeedCheck,
 	processCacheHeaders,
 	parseXmlFeed,
@@ -359,6 +498,10 @@ module.exports = {
 	checkFeed,
 	initialiseFeed,
 	formatFeedMessage,
+	formatItunesDuration,
+	shouldBlockItem,
+	FILTER_FIELDS,
+	FILTER_OPERATORS,
 	postFeedItem,
 	notifyServerOwner,
 };
