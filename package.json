@@ -8,8 +8,8 @@
 		"dev": "bun main.js"
 	},
 	"dependencies": {
-		"json-with-bigint": "^3.5.10",
-		"mysql2": "^3.23.2",
+		"json-with-bigint": "^3.5.11",
+		"mysql2": "^3.23.3",
 		"rss-parser": "^3.13.0",
 		"node-cron": "^4.6.0"
 	},
