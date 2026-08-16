@@ -4,7 +4,6 @@ import { StoatClient } from "./lib/stoat";
 import { initDatabase, loadFeeds } from "./lib/database";
 import { setupCommands } from "./lib/commands";
 import { checkAllFeeds } from "./lib/feeds";
-import { schedule } from "node-cron";
 import Parser from "rss-parser";
 import type { Pool } from "mysql2/promise";
 import type { Ctx, Feed } from "./lib/types";
@@ -82,7 +81,7 @@ class AutoFeeds {
 				setBotStatus: () => this._setBotStatus(),
 			};
 
-			schedule("*/20 * * * *", () => checkAllFeeds(ctx));
+			Bun.cron("*/20 * * * *", () => checkAllFeeds(ctx));
 			setupCommands(ctx);
 		} catch (error) {
 			console.error("Failed to initialise bot:", error);
